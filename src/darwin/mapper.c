@@ -543,6 +543,8 @@ frida_mapper_map (FridaMapper * self, GumAddress base_address)
     base_address += child->vm_size;
   }
 
+  g_print ("Mapping %s at %p->%p\n", library->name, (gpointer) base_address, (gpointer) (base_address + self->vm_size));
+
   frida_library_set_base_address (library, base_address);
   self->runtime_address = base_address + self->vm_size - self->runtime_vm_size;
 
@@ -579,6 +581,8 @@ frida_mapper_map (FridaMapper * self, GumAddress base_address)
       VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY | VM_PROT_EXECUTE);
 
   self->mapped = TRUE;
+
+  g_print ("(self) mapper->runtime_address: 0x%llx\n", self->runtime_address);
 }
 
 GumAddress
@@ -608,6 +612,9 @@ frida_mapper_resolve (FridaMapper * self, const gchar * symbol)
 
   mangled_symbol = g_strconcat ("_", symbol, NULL);
   success = frida_mapper_resolve_symbol (self, self->library, mangled_symbol, &value);
+
+  g_print ("frida_mapper_resolve: success: %d, value.resolver: 0x%llx\n", success, value.resolver);
+
   g_free (mangled_symbol);
   if (!success)
     return 0;
@@ -699,10 +706,15 @@ frida_mapper_emit_resolve_if_needed (FridaMapper * self, const FridaBindDetails 
 
   dependency = frida_mapper_dependency (self, details->library_ordinal);
   success = frida_mapper_resolve_symbol (self, dependency->library, details->symbol_name, &value);
+
+  g_print ("frida_mapper_emit_resolve_if_needed: success: %d, value.resolver: 0x%llx\n", success, value.resolver);
+
   if (!success || value.resolver == 0)
     return;
 
   entry = self->library->base_address + details->segment->vm_address + details->offset;
+
+  g_print ("Entry: 0x%llx\n", entry);
 
   gum_x86_writer_put_mov_reg_address (cw, GUM_REG_XCX, value.resolver);
   gum_x86_writer_put_call_reg (cw, GUM_REG_XCX);
@@ -837,15 +849,21 @@ frida_mapper_emit_arm_resolve_if_needed (FridaMapper * self, const FridaBindDeta
 
   dependency = frida_mapper_dependency (self, details->library_ordinal);
   success = frida_mapper_resolve_symbol (self, dependency->library, details->symbol_name, &value);
+
+  g_print ("frida_mapper_emit_arm_resolve_if_needed: success: %d, value.address: 0x%llx, value.resolver: 0x%llx\n", success, value.address, value.resolver);
+
   if (!success || value.resolver == 0)
     return;
 
   entry = self->library->base_address + details->segment->vm_address + details->offset;
 
+  g_print ("Entry: 0x%llx\n", entry);
+
   gum_thumb_writer_put_ldr_reg_address (tw, GUM_AREG_R1, value.resolver);
   gum_thumb_writer_put_blx_reg (tw, GUM_AREG_R1);
   gum_thumb_writer_put_ldr_reg_address (tw, GUM_AREG_R1, details->addend);
-  gum_thumb_writer_put_add_reg_reg_imm (tw, GUM_AREG_R0, GUM_AREG_R1, 0);
+  //gum_thumb_writer_put_add_reg_reg_imm (tw, GUM_AREG_R0, GUM_AREG_R1, 0);
+  gum_thumb_writer_put_add_reg_reg_reg (tw, GUM_AREG_R0, GUM_AREG_R0, GUM_AREG_R1);
   gum_thumb_writer_put_ldr_reg_address (tw, GUM_AREG_R1, entry);
   gum_thumb_writer_put_str_reg_reg_offset (tw, GUM_AREG_R0, GUM_AREG_R1, 0);
 }
@@ -962,15 +980,21 @@ frida_mapper_emit_arm64_resolve_if_needed (FridaMapper * self, const FridaBindDe
 
   dependency = frida_mapper_dependency (self, details->library_ordinal);
   success = frida_mapper_resolve_symbol (self, dependency->library, details->symbol_name, &value);
+
+  g_print ("frida_mapper_emit_arm64_resolve_if_needed: success: %d, value.resolver: 0x%llx\n", success, value.resolver);
+
   if (!success || value.resolver == 0)
     return;
 
   entry = self->library->base_address + details->segment->vm_address + details->offset;
 
+  g_print ("Entry: 0x%llx\n", entry);
+
   gum_arm64_writer_put_ldr_reg_address (aw, GUM_A64REG_X1, value.resolver);
   gum_arm64_writer_put_blr_reg (aw, GUM_A64REG_X1);
   gum_arm64_writer_put_ldr_reg_address (aw, GUM_A64REG_X1, details->addend);
-  gum_arm64_writer_put_add_reg_reg_imm (aw, GUM_A64REG_X0, GUM_A64REG_X1, 0);
+  //gum_arm64_writer_put_add_reg_reg_reg (aw, GUM_AREG_R0, GUM_AREG_R0, GUM_AREG_R1);
+  gum_arm64_writer_put_add_reg_reg_imm (aw, GUM_AREG_R0, GUM_AREG_R1, 0);
   gum_arm64_writer_put_ldr_reg_address (aw, GUM_A64REG_X1, entry);
   gum_arm64_writer_put_str_reg_reg_offset (aw, GUM_A64REG_X0, GUM_A64REG_X1, 0);
 }
@@ -1022,6 +1046,7 @@ frida_mapper_accumulate_bind_footprint_size (FridaMapper * self, const FridaBind
   FridaSymbolValue value;
 
   dependency = frida_mapper_dependency (self, details->library_ordinal);
+  g_print ("frida_mapper_accumulate_bind_footprint_size:\n");
   if (frida_mapper_resolve_symbol (self, dependency->library, details->symbol_name, &value))
   {
     if (value.resolver != 0)
@@ -1151,8 +1176,10 @@ frida_mapper_resolve_symbol (FridaMapper * self, FridaLibrary * library, const g
     return TRUE;
   }
 
-  if (!frida_library_resolve (library, symbol, &details))
+  if (!frida_library_resolve (library, symbol, &details)) {
+    g_print ("Failed to resolve: %s\n", symbol);
     return 0;
+  }
 
   if ((details.flags & EXPORT_SYMBOL_FLAGS_REEXPORT) != 0)
   {
@@ -1172,18 +1199,27 @@ frida_mapper_resolve_symbol (FridaMapper * self, FridaLibrary * library, const g
         /* XXX: we ignore interposing */
         value->address = library->base_address + details.stub;
         value->resolver = library->base_address + details.resolver;
+
+        g_print ("EXPORT_SYMBOL_FLAGS_STUB_AND_RESOLVER resolved %s to 0x%llx\n", symbol, value->address);
+        g_print ("detail.stub: 0x%llx, details.resolver: 0x%llx\n", details.stub, details.resolver);
+
         return TRUE;
       }
       value->address = library->base_address + details.offset;
       value->resolver = 0;
+
+      g_print ("EXPORT_SYMBOL_FLAGS_KIND_REGULAR resolved %s to 0x%llx\n", symbol, value->address);
+
       return TRUE;
     case EXPORT_SYMBOL_FLAGS_KIND_THREAD_LOCAL:
       value->address = library->base_address + details.offset;
       value->resolver = 0;
+      g_print ("EXPORT_SYMBOL_FLAGS_KIND_THREAD_LOCAL resolved %s to 0x%llx\n", symbol, value->address);
       return TRUE;
     case EXPORT_SYMBOL_FLAGS_KIND_ABSOLUTE:
       value->address = details.offset;
       value->resolver = 0;
+      g_print ("EXPORT_SYMBOL_FLAGS_KIND_ABSOLUTE resolved %s to 0x%llx\n", symbol, value->address);
       return TRUE;
     default:
       g_assert_not_reached ();
@@ -1269,12 +1305,20 @@ frida_mapper_bind (FridaMapper * self, const FridaBindDetails * details, gpointe
 
   dependency = frida_mapper_dependency (self, details->library_ordinal);
   success = frida_mapper_resolve_symbol (self, dependency->library, details->symbol_name, &value);
+
+  g_print ("frida_mapper_bind: success: %d, value.resolver: 0x%llx, value.address: 0x%llx, details->addend: 0x%llx\n", success, value.resolver, value.address, details->addend);
+
   if (success)
     value.address += details->addend;
   is_weak_import = (details->symbol_flags & BIND_SYMBOL_FLAGS_WEAK_IMPORT) != 0;
   g_assert (success || is_weak_import);
 
+  g_print ("is_weak_import: %d\n", is_weak_import);
+
   entry = frida_mapper_data_from_offset (self, details->segment->file_offset + details->offset);
+
+  g_print ("Entry: %p\n", entry);
+
   if (self->library->pointer_size == 4)
     *((guint32 *) entry) = value.address;
   else
